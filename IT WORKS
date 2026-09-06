@@ -6,7 +6,7 @@ ISSUE
 
 6 GHz TCP throughput was around 429 Mbps against a 720 Mbps criterion. UDP showed 48-55% packet loss. This was a regression from Beta RC2 to RC3.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Checked RSSI, MCS and channel bandwidth.
 2. Checked channel utilization.
@@ -29,7 +29,7 @@ ISSUE
 
 SoftAP creation was failing on SYN5312 MCU mode and the issue was blocking the Beta release. There was no wl tool or dmesg, so UART logs were used.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Captured the UART console during SoftAP creation.
 2. Checked the FW error message from the UART log.
@@ -50,7 +50,7 @@ ISSUE
 
 After upgrading the Linux kernel from 6.2 to 6.11, the DUT failed to associate with certain APs. The same FW worked with kernel 6.2.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Captured the Association Request using a sniffer.
 2. Checked the RSN IE.
@@ -72,7 +72,7 @@ ISSUE
 
 6 GHz PNO was failing across multiple platforms, but the failure was different depending on the platform.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Reproduced the PNO issue on 4384.
 2. Checked the expected PFN event in dmesg.
@@ -95,7 +95,7 @@ ISSUE
 
 Automation was giving only summary pass/fail results. When a testcase failed, detailed logs were not available, so debugging required manual reruns.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Identified that summary logs were not enough for failure analysis.
 2. Filed an automation enhancement request.
@@ -116,7 +116,7 @@ ISSUE
 
 After a client associated to the SYN5312 SoftAP, the first ping took more than 5 seconds. On the 4384 Linux-hosted platform the ping was immediate.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Reproduced the delay after SoftAP client association.
 2. Compared the same flow on the 4384 platform.
@@ -137,7 +137,7 @@ ISSUE
 
 NAT Keep-Alive worked on 43756E PCIe but returned a version mismatch on SDIO using the same chip/FW.
 
-WORKAROUND / DEBUG STORY
+WORKAROUND
 
 1. Ran the same `wl mkeep_alive` command on PCIe and SDIO.
 2. PCIe returned version 1 successfully.
