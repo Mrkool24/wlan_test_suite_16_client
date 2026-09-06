@@ -1,392 +1,150 @@
-1. : TWT traffic stall in 2.4 GHz
+============================================================
+WWLAN-3626: SoftAP 5G/6G throughput degradation
 ============================================================
 
 ISSUE
 
-Traffic stalled during TWT individual suggest mode testing in 2.4 GHz.
-
-TERMS
-
-TWT: Target Wake Time. Allows the AP and client to schedule wake-up periods for communication.
-
-Individual TWT: TWT agreement between one AP and one client.
-
-WORKAROUND / DEBUG STORY
-
-1. Verified the TWT session using `wl dump twt`.
-2. Checked the power management state and TWT schedule.
-3. Correlated the traffic stall with firmware events and WLAN logs.
-4. Compared the failing build with the previous working build to identify a regression.
-5. Compared behavior with TWT disabled to isolate the TWT-related flow.
-6. Narrowed the investigation towards the TWT and power management interaction.
-
-STATUS
-
-Final confirmed workaround is not available in the Jira information currently captured.
-
-
-============================================================
-2. : TWT link down in auto-schedule
-============================================================
-
-ISSUE
-
-Link went down during TWT auto-schedule testing. The issue was consistently reproducible in 2.4 GHz and intermittent in 5 GHz.
-
-TERMS
-
-TWT: Target Wake Time. Allows the AP and client to schedule wake-up periods for communication.
-
-Auto-schedule: TWT operation where the scheduling is handled automatically based on the configured TWT flow.
-
-DPM: Dynamic Power Management. Handles power-related transitions in the WLAN path.
-
-WORKAROUND / DEBUG STORY
-
-1. Verified the TWT agreement and schedule.
-2. Checked the power-management state during the failure.
-3. Correlated the link-down event with DPM/firmware events.
-4. Compared 2.4 GHz and 5 GHz behavior because the reproducibility was different.
-5. Compared builds to identify whether the issue was introduced by a firmware change.
-6. Narrowed the failure towards the TWT and DPM interaction.
-7. Provided the reproduction details and logs to the firmware team.
-
-STATUS
-
-Firmware team identified the DPM timer interaction with TWT and fixed the issue. Validation was completed and the release was unblocked.
-
-
-============================================================
-3. : TDLS low throughput
-============================================================
-
-ISSUE
-
-5 GHz TDLS throughput was around 200 Mbps, while the expected criteria was around 840 Mbps for UDP and 720 Mbps for TCP.
-
-TERMS
-
-TDLS: Tunneled Direct Link Setup. Allows two WLAN clients to communicate through a direct link.
-
-AMPDU: Aggregated MAC Protocol Data Unit. Multiple MPDUs are aggregated together to improve channel efficiency.
-
-ADDBA: Add Block Acknowledgment. Used to establish a Block ACK agreement.
-
-WORKAROUND / DEBUG STORY
-
-1. Checked the channel bandwidth and MCS.
-2. Compared the actual throughput against the UDP and TCP criteria.
-3. Checked whether AMPDU aggregation was happening on the TDLS direct link.
-4. Inspected the Block ACK / ADDBA behavior.
-5. Observed that the expected BA session was not getting established after the TDLS setup.
-6. Used this behavior to narrow the investigation towards the firmware TDLS/aggregation path.
-
-STATUS
-
-The captured Jira material identifies the missing BA/ADDBA establishment as the main failure direction. FW correction and validation were tracked. I would avoid claiming any deeper internal RCA unless the final Jira details are available.
-
-
-============================================================
-4. : SoftAP 5G/6G throughput degradation
-============================================================
-
-ISSUE
-
-6 GHz TCP throughput was around 429 Mbps against a 720 Mbps criterion. UDP also showed intermittent 48-55% packet loss. The issue was a regression from Beta RC2 to RC3.
-
-TERMS
-
-SoftAP: Software Access Point. The DUT provides AP functionality through software.
-
-RSSI: Received Signal Strength Indicator. Indicates received signal strength.
-
-MCS: Modulation and Coding Scheme. Represents the modulation/coding level used for WLAN transmission.
-
-TX: Transmit.
+6 GHz TCP throughput was around 429 Mbps against a 720 Mbps criterion. UDP showed 48-55% packet loss. This was a regression from Beta RC2 to RC3.
 
 WORKAROUND / DEBUG STORY
 
 1. Checked RSSI, MCS and channel bandwidth.
-2. Checked channel utilization to make sure the issue was not simply due to channel conditions.
+2. Checked channel utilization.
 3. Compared TCP and UDP behavior.
-4. The high UDP packet loss gave a better indication that this was not just a TCP throughput issue.
-5. Compared the failing RC3 build with RC2.
-6. Narrowed the issue towards the firmware TX scheduler.
-7. Collected the throughput and packet-loss evidence and reported it to the FW team.
+4. Compared RC3 with the previous working RC2 build.
+5. High UDP packet loss pointed towards a packet delivery issue rather than only a TCP problem.
+6. Narrowed the issue towards the FW TX scheduler.
+7. Provided the throughput and packet-loss data to the FW team.
 
-STATUS
+RESOLUTION
 
-The investigation was narrowed towards the firmware TX scheduler (`umsched`). The captured material reports a scheduler fix followed by validation.
-
-
-============================================================
-5. : P2P GO advertises EHT instead of HE
-============================================================
-
-ISSUE
-
-P2P GO advertised EHT capabilities even though the expected configuration was HE. This caused an automation failure and was seen as a regression.
-
-TERMS
-
-P2P: Peer-to-Peer. Direct WLAN communication without a traditional AP role.
-
-GO: Group Owner. The AP-like role in a P2P group.
-
-HE: High Efficiency. 802.11ax capability set.
-
-EHT: Extremely High Throughput. 802.11be / Wi-Fi 7 capability set.
-
-WORKAROUND / DEBUG STORY
-
-1. Configured the expected WLAN capability.
-2. Used `wl eht features` to verify the EHT configuration.
-3. Captured the P2P GO beacon and checked the advertised information elements.
-4. Compared the advertised capabilities with the expected HE configuration.
-5. Checked the behavior against the previous build.
-6. Treated the behavior as a regression and collected the PCAP/capability evidence.
-
-STATUS
-
-The regression was reported with capability evidence. A detailed final RCA or confirmed workaround is not available in the Jira information currently captured.
+FW scheduler issue was fixed. Fix was validated and the throughput/traffic behavior was retested.
 
 
 ============================================================
-6. : AP+AP RSDB switch failure
+W5312-6334: SoftAP creation failure in MCU mode
 ============================================================
 
 ISSUE
 
-After creating 2.4 GHz and 5 GHz SoftAP interfaces, the DUT stayed in MIMO mode instead of switching to RSDB. Because of this, the second AP client failed to associate.
-
-TERMS
-
-RSDB: Real Simultaneous Dual Band. Allows simultaneous WLAN operation across two bands/radios.
-
-MIMO: Multiple Input Multiple Output. Uses multiple antennas/spatial streams for WLAN communication.
-
-AP: Access Point.
+SoftAP creation was failing on SYN5312 MCU mode and the issue was blocking the Beta release. There was no wl tool or dmesg, so UART logs were used.
 
 WORKAROUND / DEBUG STORY
 
-1. Created the first SoftAP and verified that it was working.
-2. Created the second AP interface.
-3. Checked the radio mode after the second interface was created.
-4. Observed that the DUT remained in MIMO instead of switching to RSDB.
-5. Checked the second client's association failure.
-6. Compared the interface creation path with the working AP creation path.
-7. Narrowed the issue towards the firmware auto-RSDB switch trigger.
+1. Captured the UART console during SoftAP creation.
+2. Checked the FW error message from the UART log.
+3. Compared the 5312 SoftAP bring-up sequence with the working 4384 sequence.
+4. Found the difference in the initialization sequence.
+5. Shared the step-by-step comparison with the FW team.
 
-STATUS
+RESOLUTION
 
-The captured material identifies that the `interface_create` path did not trigger the expected FW auto-RSDB switch. The working path explicitly enabled RSDB before creating the second AP interface.
+FW team identified a missing initialization step in the MCU-mode AP bring-up and fixed it through an emergency patch. Beta release proceeded.
 
 
 ============================================================
-7. : SoftAP creation failure in MCU mode
+WWLAN-3563: Kernel RSN capability regression
 ============================================================
 
 ISSUE
 
-SoftAP creation failed on SYN5312 in MCU mode and blocked Beta validation. The normal `wl` and dmesg debug path was not available, so UART logs were used.
-
-TERMS
-
-MCU: Microcontroller Unit.
-
-UART: Universal Asynchronous Receiver-Transmitter.
-
-SoftAP: Software Access Point.
+After upgrading the Linux kernel from 6.2 to 6.11, the DUT failed to associate with certain APs. The same FW worked with kernel 6.2.
 
 WORKAROUND / DEBUG STORY
 
-1. Captured the UART console while reproducing the SoftAP creation failure.
-2. Identified the firmware error from the UART sequence.
-3. Compared the 5312 AP bring-up sequence with the working 4384 sequence.
-4. Looked for the point where the two sequences differed.
-5. Shared the sequence difference and logs with the firmware team.
-6. The investigation was narrowed towards a missing initialization step in the MCU-mode AP bring-up.
+1. Captured the Association Request using a sniffer.
+2. Checked the RSN IE.
+3. Found RSN Capabilities as 0x008c instead of 0x0080.
+4. Tested the same FW with kernel 6.2 and 6.11.
+5. 6.2 worked and 6.11 failed.
+6. This isolated the issue to the kernel/cfg80211 side.
 
-STATUS
+RESOLUTION
 
-Firmware identified a missing initialization step and provided an emergency patch. Beta validation proceeded after the fix.
+Kernel team identified the cfg80211 RSN IE construction change and provided a patch. Association was restored after the patch.
 
 
 ============================================================
-8. : TWT long-run device crash
+WWLAN-3535 / W43756-572 / W43711-2575: 6G PNO issues
 ============================================================
 
 ISSUE
 
-The device crashed during extended TWT testing. The crash was not reproducible as a short isolated test and appeared only after a long run.
-
-TERMS
-
-TWT: Target Wake Time.
-
-RCA: Root Cause Analysis.
-
-socram: System-on-Chip RAM dump used for crash/debug analysis.
+6 GHz PNO was failing across multiple platforms, but the failure was different depending on the platform.
 
 WORKAROUND / DEBUG STORY
 
-1. Ran extended TWT traffic testing.
-2. Collected the crash information and socram/trap data.
-3. Looked at the sequence leading up to the crash.
-4. Considered accumulated state, resource leak, race condition and stale TWT state as possible directions.
-5. Compared longer runs and isolated flows.
-6. Used the crash artifacts to narrow the investigation towards accumulated state corruption.
+1. Reproduced the PNO issue on 4384.
+2. Checked the expected PFN event in dmesg.
+3. Repeated the same scenario on 43756E PCIe.
+4. Repeated it again on 43711 SDIO.
+5. Compared the behavior across the three platforms.
+6. Identified that 4384 and 43756E had a common FW issue, while 43711 had an SDIO timing issue.
+7. Filed the platform-specific evidence separately.
 
-STATUS
+RESOLUTION
 
-The captured material points towards accumulated state corruption as the investigation direction, but it does not establish a final exact firmware RCA. I would explain this carefully in an interview rather than claiming a confirmed internal cause.
+FW team fixed the common 6G PNO issue for 4384 and 43756E. The SDIO timing issue was fixed separately for 43711. All three platforms passed 6G PNO after the fixes.
 
 
 ============================================================
-9. : SoftAP EHT capability reset on wlan0
+WTEST-13189: Full console log collection
 ============================================================
 
 ISSUE
 
-EHT was enabled using `wl eht features 3`, but after SoftAP initialization on wlan0 the capability returned to 0x02, effectively showing HE-only capability.
-
-TERMS
-
-EHT: Extremely High Throughput.
-
-hostapd: Host Access Point Daemon.
-
-nl80211: Linux 802.11 netlink interface used for communication between hostapd and the WLAN driver.
+Automation was giving only summary pass/fail results. When a testcase failed, detailed logs were not available, so debugging required manual reruns.
 
 WORKAROUND / DEBUG STORY
 
-1. Enabled EHT using `wl eht features 3`.
-2. Created the SoftAP on wlan0.
-3. Checked the EHT capability again.
-4. Compared wlan0 behavior with wlan1.
-5. Collected hostapd nl80211 debug output.
-6. Observed that HE was enabled but the EHT field was missing after the interface transition.
-7. Narrowed the issue towards the primary-interface mode-switch/capability reset path.
+1. Identified that summary logs were not enough for failure analysis.
+2. Filed an automation enhancement request.
+3. Requested `wl dump console` after every sub-testcase.
+4. Requested separate log files linked to the testcase ID.
+5. Used the updated logging during later regression runs.
 
-STATUS
+RESOLUTION
 
-The captured RCA is that the wlan0 mode-switch path using `NL80211_CMD_SET_INTERFACE` caused a driver capability reset during the primary interface transition. wlan1 did not follow the same reset path.
+Automation team implemented full console log collection. Later regression runs had complete logs and failure-debugging time reduced from hours to minutes.
 
 
 ============================================================
-10. : Multiclient 10 simultaneous WLAN connections
+W5312-4781: SoftAP first-ping delay
 ============================================================
 
 ISSUE
 
-Validated up to 10 simultaneous WLAN client connections on SYN4384B0 / ASTRA. During the multiclient testing, 6 GHz traffic failures were observed.
-
-TERMS
-
-Multiclient: Validation involving multiple WLAN clients connected at the same time.
-
-DHCP: Dynamic Host Configuration Protocol.
-
-ASTRA: Test setup/platform used for the multiclient validation.
+After a client associated to the SYN5312 SoftAP, the first ping took more than 5 seconds. On the 4384 Linux-hosted platform the ping was immediate.
 
 WORKAROUND / DEBUG STORY
 
-1. Set up the multiclient environment.
-2. Associated multiple clients simultaneously.
-3. Validated IP assignment and DHCP.
-4. Checked connectivity between the clients and AP.
-5. Ran traffic with multiple clients.
-6. Monitored the behavior across the connected clients.
-7. Recorded the 6 GHz traffic failures for further investigation.
+1. Reproduced the delay after SoftAP client association.
+2. Compared the same flow on the 4384 platform.
+3. Checked the DHCP startup behavior.
+4. Found that the MCU-mode DHCP server was starting slowly.
+5. Compared the different platform bring-up behavior.
 
-STATUS
+RESOLUTION
 
-The multiclient validation exposed 6 GHz traffic failures for investigation. A single confirmed final RCA is not available in the Jira information currently captured.
+RCA was the slow DHCP server startup in MCU mode. The issue was identified as a platform-specific startup behavior.
 
 
 ============================================================
-11. : Full console log collection automation
+W43756-534 / W43756-576: NAT Keep-Alive version mismatch
 ============================================================
 
 ISSUE
 
-The automation framework was previously providing only summary pass/fail information after sub-testcases. When a failure happened, additional manual debugging or reruns were required.
-
-TERMS
-
-WTEST: WLAN test / automation tracking.
-
-wl: Firmware WLAN command-line/debug interface.
-
-Regression: Repeated validation after a software or firmware change.
+NAT Keep-Alive worked on 43756E PCIe but returned a version mismatch on SDIO using the same chip/FW.
 
 WORKAROUND / DEBUG STORY
 
-1. Identified that summary results were not enough for failure analysis.
-2. Requested full console output after each sub-testcase.
-3. Defined collection of `wl dump console` output after every testcase.
-4. Required separate logs to be associated with testcase IDs.
-5. Coordinated the automation enhancement.
-6. Used the detailed logs during subsequent regression runs.
+1. Ran the same `wl mkeep_alive` command on PCIe and SDIO.
+2. PCIe returned version 1 successfully.
+3. SDIO returned version mismatch.
+4. Compared the DHD driver path between PCIe and SDIO.
+5. Isolated the mismatch to the SDIO DHD branch expecting a different version format.
 
-STATUS
+RESOLUTION
 
-The automation enhancement was implemented. Subsequent regression runs had complete console logs, and the captured material reports that debugging time reduced from hours to minutes.
-
-
-============================================================
-12. : Kernel RSN capability regression
-============================================================
-
-ISSUE
-
-Association failed after upgrading the Linux kernel from 6.2 to 6.11, even though the same firmware worked with the older kernel.
-
-TERMS
-
-RSN: Robust Security Network.
-
-IE: Information Element. Information carried inside an 802.11 management frame.
-
-cfg80211: Linux wireless configuration framework.
-
-WORKAROUND / DEBUG STORY
-
-1. Captured the Association Request in a sniffer/PCAP.
-2. Inspected the RSN Capabilities field.
-3. Observed 0x008c instead of the expected 0x0080.
-4. Tested the same firmware with kernel 6.2 and 6.11.
-5. Used the kernel comparison to isolate the change.
-6. Narrowed the issue to cfg80211 RSN IE construction.
-
-STATUS
-
-The kernel-side cfg80211 handling was identified as the regression source. A kernel patch restored successful association.
-
-
-============================================================
-13. : CHANIM / ACS channel count validation
-============================================================
-
-ISSUE
-
-`wl chanim_max_acs` returned 5 instead of the expected value 10 (`0xa`).
-
-TERMS
-
-CHANIM: Channel interference / channel utilization monitoring mechanism.
-
-ACS: Automatic Channel Selection.
-
-wl: Firmware WLAN command-line/debug interface.
-
-WORKAROUND / DEBUG STORY
-
-1. Executed the CHANIM/ACS command.
-2. Captured the actual returned value.
-3. Compared it with the expected value 10 (`0xa`).
-4. Reported the mismatch for investigation/correction.
-
-STATUS
-
-The captured Jira information confirms the value mismatch, but a final detailed RCA or workaround is not available in the material currently captured.
+The issue was isolated to the SDIO DHD driver path rather than the FW. The driver/FW version-format mismatch was identified for correction.
