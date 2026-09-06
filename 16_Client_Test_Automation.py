@@ -90,6 +90,10 @@ elif [ "$TYPE" == "vi" ]; then
     iperf -c $SERVER_IP -f m -i 1 -w 12M -u -S 0xA0 -b 500.0M -t $DURATION -p $PORT -l 1470 | tee $OUTPUT_FILE
 elif [ "$TYPE" == "vo" ]; then
     iperf -c $SERVER_IP -f m -i 1 -w 12M -u -S 0xE0 -b 500.0M -t $DURATION -p $PORT -l 1470 | tee $OUTPUT_FILE
+elif [ "$TYPE" == "be" ]; then
+    iperf -c $SERVER_IP -f m -i 1 -w 12M -u -S 0x00 -b 500.0M -t $DURATION -p $PORT -l 1470 | tee $OUTPUT_FILE
+elif [ "$TYPE" == "bk" ]; then
+    iperf -c $SERVER_IP -f m -i 1 -w 12M -u -S 0x20 -b 500.0M -t $DURATION -p $PORT -l 1470 | tee $OUTPUT_FILE
 else
     echo "Invalid TYPE specified. Use tcp, udp, vi, or vo."
     exit 1
@@ -139,6 +143,12 @@ elif [ "$TYPE" == "vi" ]; then
     IPERF_PID=$!
 elif [ "$TYPE" == "vo" ]; then
     iperf -s -f m -i 1 -w 12M -u -S 0xE0 -p $PORT -l 1470 | tee $OUTPUT_FILE &
+    IPERF_PID=$!
+elif [ "$TYPE" == "be" ]; then
+    iperf -s -f m -i 1 -w 12M -u -S 0x00 -p $PORT -l 1470 | tee $OUTPUT_FILE &
+    IPERF_PID=$!
+elif [ "$TYPE" == "bk" ]; then
+    iperf -s -f m -i 1 -w 12M -u -S 0x20 -p $PORT -l 1470 | tee $OUTPUT_FILE &
     IPERF_PID=$!
 else
     echo "Invalid Type specified. Use tcp, udp, vi, or vo."
@@ -641,7 +651,8 @@ def fetch_pcap(t_sniff, pcap_name, cap_secs):
 def set_bandwidth(local_file, ttype, bval):
     """Edit only the selected type's iperf line in dynamic_client.sh, setting -b.
     udp line is identified by '-u -b', vi by '-S 0xA0', vo by '-S 0xE0'."""
-    marker = {"udp": "-u -b", "vi": "-S 0xA0", "vo": "-S 0xE0"}.get(ttype)
+    marker = {"udp": "-u -b", "vi": "-S 0xA0", "vo": "-S 0xE0",
+             "be": "-S 0x00", "bk": "-S 0x20"}.get(ttype)
     if marker is None:
         return False
     try:
@@ -1768,6 +1779,240 @@ def _run_ping_only(dut, clients, mode, iteration=None):
                               steps=steps, cmds=cmds)
 
 
+# ======================================================================
+# Option 10 : VI+VO+BE+BK simultaneous traffic (DUT -> clients)
+# ======================================================================
+VVBB_TYPES = ["vi", "vo", "be", "bk"]
+
+
+def _vvbb_port(i, typ):
+    offsets = {"vi": 0, "vo": 1, "be": 2, "bk": 3}
+    return 10001 + i * 4 + offsets[typ]
+
+
+def opt_vi_vo_be_bk():
+    print("\n--- VI+VO+BE+BK simultaneous traffic (DUT -> clients) ---")
+    dut, clients = ask_setup()
+    if not clients:
+        print("No clients entered.")
+        return
+    ch = ask_channel()
+    _run_vvbb(dut, clients, ch)
+
+
+def _run_vvbb(dut, clients, ch, iteration=None):
+    n = len(clients)
+    dur = DURATION
+    cmds = []
+    ensure_local("dynamic_client.sh")
+    ensure_local("dynamic_server.sh")
+
+    # ---- even bandwidth split: 1200M / (n_clients * 4 types) ----
+    bw = compute_bw(n * 4)
+    for typ in VVBB_TYPES:
+        set_bandwidth("dynamic_client.sh", typ, bw)
+    print(f"VVBB bandwidth: {bw}  (1200 / ({n} clients x 4 types))")
+    _scp_file("dynamic_client.sh", all_hardcoded_targets())
+    _scp_file("dynamic_server.sh", all_hardcoded_targets())
+
+    # ---- STEP1: data-plane IPs ----
+    cmd = f"ifconfig wlan1 {dut['data']}"
+    cmds.append(f"[STEP1 assign-ip][DUT {dut['ip']}] {cmd}")
+    execute_command(cmd, remote_host=dut["ip"])
+    for c in clients:
+        cmd = f"ifconfig wlan0 {c['data']}"
+        cmds.append(f"[STEP1 assign-ip][{c['ip']}] {cmd}")
+        execute_command(cmd, remote_host=c["ip"])
+    execute_command("killall -9 iperf", remote_host=dut["ip"])
+    for c in clients:
+        execute_command("killall -9 iperf", remote_host=c["ip"])
+
+    # ---- STEP2: pre-traffic ping ----
+    print("\nPre-traffic ping (10s)...")
+    for x in start_ping(dut, clients, "d2c", "ping_pre"):
+        cmds.append(f"[STEP2 pre-ping] {x}")
+    time.sleep(13)
+    fetch_ping(dut, clients, "d2c", "ping_pre")
+
+    # ---- STEP3: sniffer ----
+    pcap = f"{n}vvbbTX"
+    cap_secs = int(dur) + 10
+    cmds.append(f"[STEP3 sniffer][{SNIFFER_IP}] chanspec {ch}")
+    start_sniffer(ch, pcap, cap_secs)
+    t_sniff = time.time()
+    time.sleep(5)
+
+    # ---- STEP4: launch all 4 types, all clients, servers first then clients ----
+    for i, c in enumerate(clients):
+        for typ in VVBB_TYPES:
+            port = _vvbb_port(i, typ)
+            cmd = f"cd {c['path']} && ./dynamic_server.sh {typ} {port} s{i+1}_{typ}.txt {dur}"
+            cmds.append(f"[STEP4 server][{c['ip']} {typ}] {cmd}")
+            execute_command(cmd, remote_host=c["ip"], new_terminal=True,
+                            terminal_name=f"STA{i+1}_{typ}_Server")
+    for i, c in enumerate(clients):
+        for typ in VVBB_TYPES:
+            port = _vvbb_port(i, typ)
+            cmd = f"cd {dut['path']} && ./dynamic_client.sh {c['data']} {typ} {port} c{i+1}_{typ}.txt {dur}"
+            cmds.append(f"[STEP4 client][DUT->{c['ip']} {typ}] {cmd}")
+            execute_command(cmd, remote_host=dut["ip"], new_terminal=True,
+                            terminal_name=f"DUT_STA{i+1}_{typ}")
+
+    # RSSI per client (one radio, covers all 4 streams)
+    for i, c in enumerate(clients):
+        rcmd = (f"cd {c['path']} && for s in {{1..{dur}}}; do "
+                f"wl -i wlan0 phy_rssi_ant; sleep 1; done | tee rssi{i+1}.log")
+        cmds.append(f"[STEP4 rssi][{c['ip']}] {rcmd}")
+        execute_command(rcmd, remote_host=c["ip"], new_terminal=True,
+                        terminal_name=f"RSSI_STA{i+1}")
+
+    # ---- STEP5: during-traffic ping ----
+    time.sleep(10)
+    print("During-traffic ping (10s)...")
+    for x in start_ping(dut, clients, "d2c", "ping_dur"):
+        cmds.append(f"[STEP5 during-ping] {x}")
+    time.sleep(int(dur) - 10 + 3)
+
+    execute_command("killall -9 iperf", remote_host=dut["ip"])
+    for c in clients:
+        execute_command("killall -9 iperf", remote_host=c["ip"])
+
+    # ---- STEP6: fetch everything ----
+    for i, c in enumerate(clients):
+        for typ in VVBB_TYPES:
+            fetch_file(c["ip"], f"{c['path']}/s{i+1}_{typ}.txt", f"s{i+1}_{typ}.txt")
+            fetch_file(dut["ip"], f"{dut['path']}/c{i+1}_{typ}.txt", f"c{i+1}_{typ}.txt")
+    fetch_ping(dut, clients, "d2c", "ping_dur")
+    for i, c in enumerate(clients):
+        fetch_file(c["ip"], f"{c['path']}/rssi{i+1}.log", f"rssi{i+1}.log")
+    fetch_pcap(t_sniff, pcap, cap_secs)
+
+    # ---- gather per-client per-type throughput ----
+    rows = []   # (i+1, ip, type, {vi:val, vo:val, be:val, bk:val}, {..methods..}, rssi)
+    stalls = []
+    total_all = 0.0
+    for i, c in enumerate(clients):
+        vals, methods = {}, {}
+        for typ in VVBB_TYPES:
+            val, method = server_throughput(f"s{i+1}_{typ}.txt")
+            vals[typ] = val
+            methods[typ] = method
+            if val is not None:
+                total_all += val
+            z = count_zero_intervals(f"s{i+1}_{typ}.txt")
+            if z:
+                stalls.append((f"STA{i+1}", c["ip"], f"server-{typ}", f"s{i+1}_{typ}.txt", z))
+            z2 = count_zero_intervals(f"c{i+1}_{typ}.txt")
+            if z2:
+                stalls.append((f"STA{i+1}", c["ip"], f"client-{typ}", f"c{i+1}_{typ}.txt", z2))
+        rssi = rssi_mid(f"rssi{i+1}.log", dur)
+        rows.append((i + 1, c["ip"], c["type"], vals, methods, rssi))
+    pre_rows = gather_ping(clients, "ping_pre")
+    dur_rows = gather_ping(clients, "ping_dur")
+
+    write_vvbb_results(dut, clients, rows, total_all, pre_rows, dur_rows,
+                       stalls, cmds, bw, iteration)
+
+
+def write_vvbb_results(dut, clients, rows, total_all, pre_rows, dur_rows,
+                       stalls, cmds, bw, iteration):
+    summary_file = "VVBB_traffic_summary.txt"
+    with open(summary_file, "w") as s:
+        s.write(f"VI+VO+BE+BK simultaneous traffic summary ({DURATION}s, bw={bw}/stream)\n")
+        s.write(f"DUT (SoftAP): {dut['ip']} ({dut['type']})\n")
+
+        s.write("\n" + "=" * 60 + "\nZERO-THROUGHPUT STALLS\n" + "=" * 60 + "\n")
+        if stalls:
+            for (sta, ip, role, fname, z) in stalls:
+                s.write(f"  {sta} {ip} {role} log ({fname}): {z} zero-Mbps interval(s)\n")
+        else:
+            s.write("  none\n")
+
+        s.write("\nCOMMANDS USED:\n")
+        for line in cmds:
+            s.write(f"  {line}\n")
+
+        s.write("\n" + "=" * 60 + "\nPARSED SUMMARY\n" + "=" * 60 + "\n")
+        for (idx, ip, typ, vals, methods, rssi) in rows:
+            s.write(f"  STA{idx} {ip} ({typ}):\n")
+            for t in VVBB_TYPES:
+                s.write(f"    {t.upper()}: {_fmt(vals[t],1)} Mbits/sec [{methods[t]}]\n")
+            s.write(f"    RSSI: {rssi or 'NO DATA'}\n")
+        s.write(f"\n  TOTAL (all STAs, all types): {total_all:.1f} Mbits/sec\n")
+
+        s.write("\nPre-traffic ping (avg ms, 10s):\n")
+        for (idx, ip, typ, rtt) in pre_rows:
+            s.write(f"  STA{idx} {ip} ({typ}): {_fmt(rtt,3)}\n")
+        s.write("\nDuring-traffic ping (avg ms, 10s):\n")
+        for (idx, ip, typ, rtt) in dur_rows:
+            s.write(f"  STA{idx} {ip} ({typ}): {_fmt(rtt,3)}\n")
+    print(f"Summary -> {summary_file}")
+
+    # ---- Excel ----
+    try:
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font
+    except ImportError:
+        print("openpyxl not installed -> Excel skipped")
+        return
+    xlsx_path = "wlan_results.xlsx"
+    if os.path.exists(xlsx_path):
+        wb = openpyxl.load_workbook(xlsx_path)
+        ws = wb["Results"] if "Results" in wb.sheetnames else wb.active
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Results"
+    if iteration is None:
+        iteration = _next_iteration(xlsx_path)
+    if ws.max_row and ws.max_row > 1:
+        ws.append([])
+
+    ws.append([f"Iteration {iteration} - VI+VO+BE+BK simultaneous (DUT->clients)",
+               time.strftime("%Y-%m-%d %H:%M:%S")])
+    block_start = ws.max_row
+    ws.append([f"Summary file: {summary_file}", f"bw={bw}", f"dur={DURATION}s"])
+    ws.append([])
+    ws.append(["STA", "IP", "Type", "VI Mbps", "VO Mbps", "BE Mbps", "BK Mbps", "RSSI"])
+    for (idx, ip, typ, vals, methods, rssi) in rows:
+        ws.append([f"STA{idx}", ip, typ,
+                   round(vals["vi"], 1) if vals["vi"] is not None else "NO DATA",
+                   round(vals["vo"], 1) if vals["vo"] is not None else "NO DATA",
+                   round(vals["be"], 1) if vals["be"] is not None else "NO DATA",
+                   round(vals["bk"], 1) if vals["bk"] is not None else "NO DATA",
+                   rssi or "NO DATA"])
+    ws.append(["TOTAL (all types)", "", "", "", "", "", round(total_all, 1), ""])
+    ws.append([])
+
+    ws.append(["Pre-traffic Ping (10s, ms)"])
+    ws.append(["STA", "Latency", "IP", "Type"])
+    for (idx, ip, typ, rtt) in pre_rows:
+        ws.append([f"STA{idx}", round(rtt,3) if rtt is not None else "NO DATA", ip, typ])
+    ws.append([])
+    ws.append(["During-traffic Ping (10s, ms)"])
+    ws.append(["STA", "Latency", "IP", "Type"])
+    for (idx, ip, typ, rtt) in dur_rows:
+        ws.append([f"STA{idx}", round(rtt,3) if rtt is not None else "NO DATA", ip, typ])
+    ws.append([])
+
+    if stalls:
+        ws.append(["ZERO-THROUGHPUT STALLS"])
+        for (sta, ip, role, fname, z) in stalls:
+            ws.append([f"  {sta} {ip} {role} ({fname}): {z} zero-Mbps interval(s)"])
+        ws.append([])
+
+    ws.append(["end of block"])
+    block_end = ws.max_row
+    tint = "FFF2CC" if iteration % 2 else "DDEBF7"
+    fill = PatternFill("solid", fgColor=tint)
+    for r in range(block_start, block_end + 1):
+        for cc in range(1, 9):
+            ws.cell(row=r, column=cc).fill = fill
+    ws.cell(row=block_start, column=1).font = Font(bold=True)
+
+    wb.save(xlsx_path)
+    print(f"Excel: Iteration {iteration} - VVBB -> {xlsx_path}")
+
 # ---------------- option entry points ----------------
 def opt_bd():
     print("\n--- Bidirectional traffic (DUT <-> clients) ---")
@@ -2715,10 +2960,11 @@ def main():
         "7": ("Combo: Ping + TX + RX + BD (one iteration)", opt_combo),
         "8": ("Memuse stress check (deauth + rejoin)", opt_memuse_stress),
         "9": ("Memuse stress check for N iterations (deauth + rejoin)", opt_memuse_stress_n),
-        "10": ("Edit a dependency file + scp to devices", opt_edit_deps),
-        "11": ("Close all spawned terminals (keep this one)", opt_close_terminals),
-        "12": ("Push a custom file to all/selected devices", opt_push_custom),
-        "13": ("Auto assign IPs to hardcoded devices", opt_assign_ips),
+        "10": ("VI+VO+BE+BK simultaneous traffic (DUT -> clients)", opt_vi_vo_be_bk),
+        "11": ("Edit a dependency file + scp to devices", opt_edit_deps),
+        "12": ("Close all spawned terminals (keep this one)", opt_close_terminals),
+        "13": ("Push a custom file to all/selected devices", opt_push_custom),
+        "14": ("Auto assign IPs to hardcoded devices", opt_assign_ips),
     }
     while True:
         print("\n==================== WLAN TEST SUITE ====================")
