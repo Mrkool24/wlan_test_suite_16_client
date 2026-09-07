@@ -67,29 +67,6 @@ Kernel team identified the cfg80211 RSN IE construction change and provided a pa
 
 
 ============================================================
-WWLAN-3535 / W43756-572 / W43711-2575: 6G PNO issues
-============================================================
-
-ISSUE
-
-6 GHz PNO was failing across multiple platforms, but the failure was different depending on the platform.
-
-WORKAROUND
-
-1. Reproduced the PNO issue on 4384.
-2. Checked the expected PFN event in dmesg.
-3. Repeated the same scenario on 43756E PCIe.
-4. Repeated it again on 43711 SDIO.
-5. Compared the behavior across the three platforms.
-6. Identified that 4384 and 43756E had a common FW issue, while 43711 had an SDIO timing issue.
-7. Filed the platform-specific evidence separately.
-
-RESOLUTION
-
-FW team fixed the common 6G PNO issue for 4384 and 43756E. The SDIO timing issue was fixed separately for 43711. All three platforms passed 6G PNO after the fixes.
-
-
-============================================================
 WTEST-13189: Full console log collection
 ============================================================
 
