@@ -1,0 +1,789 @@
+import subprocess
+import time
+import base64
+import shlex
+import sys
+import os
+import serial
+from typing import Dict, List, Tuple, Optional
+
+# ============================================================================
+# FILE GENERATION TEMPLATES
+# ============================================================================
+TMCONFIG_PY = '''import sys
+import serial
+import time
+def configure_ap(interface, ch):
+    if ch == "B":
+        commands = [
+            f'wl -i wl2 csa 0 6 6',
+            f'wl -i wl1 csa 0 6 37',
+            f'wl -i wl0 csa 0 6 6g5',
+            f'wl -i wl2 status | grep Chanspec:',
+            f'wl -i wl1 status | grep Chanspec:',
+            f'wl -i wl0 status | grep Chanspec:'
+        ]
+    elif ch:
+        commands = [
+            f'wl -i {{interface}} csa 0 6 {{ch}}',
+            f'wl -i {{interface}} status | grep Chanspec'
+        ]
+    else:
+        print("Invalid")
+        return
+    serial_port = '{serial_port}'
+    baud_rate = 115200
+    try:
+        with serial.Serial(serial_port, baud_rate, timeout=2) as ser:
+            time.sleep(1)
+            for command in commands:
+                ser.write((command + '\\n').encode('utf-8'))
+                time.sleep(1)
+                while ser.in_waiting > 0:
+                    output = ser.read_until(b'\\n').decode('utf-8')
+                    print(output)
+    except serial.SerialException as e:
+        print(f"Error: {{e}}")
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python3 TMconfig.py <interface> <ch>")
+        sys.exit(1)
+    interface = sys.argv[1]
+    ch = sys.argv[2]
+    configure_ap(interface, ch)
+'''
+
+TMSEC_PY = '''import sys
+import serial
+import time
+def configure_ap(interface, security_type):
+    if security_type == "open":
+        commands = [
+            f'nvram set wl0_ssid="BrcmAP0"',
+            f'nvram set wl1_ssid="BrcmAP1"',
+            f'nvram set wl2_ssid="BrcmAP2"',
+            f'nvram set {{interface}}_auth="0"',
+            f'nvram set {{interface}}_auth_mode="open"',
+            f'nvram set {{interface}}_akm=""',
+            f'nvram set {{interface}}_wep="disabled"',
+            f'nvram set {{interface}}_closed="0"',
+            'nvram commit',
+            'nvram restart'
+        ]
+    elif security_type == "wpa2":
+        commands = [
+            f'nvram set wl0_ssid="BrcmAP0"',
+            f'nvram set wl1_ssid="BrcmAP1"',
+            f'nvram set wl2_ssid="BrcmAP2"',
+            f'nvram set {{interface}}_akm="psk2"',
+            f'nvram set {{interface}}_crypto="aes"',
+            f'nvram set {{interface}}_wpa_psk="9876543210"',
+            f'nvram set {{interface}}_key="1"',
+            f'nvram set {{interface}}_key4="12345"',
+            f'nvram set {{interface}}_key1="12345"',
+            f'nvram set {{interface}}_closed="0"',
+            'nvram commit',
+            'nvram restart'
+        ]
+    elif security_type == "wpa3":
+        commands = [
+            f'nvram set wl0_ssid="BrcmAP0"',
+            f'nvram set wl1_ssid="BrcmAP1"',
+            f'nvram set wl2_ssid="BrcmAP2"',
+            f'nvram set {{interface}}_akm="sae"',
+            f'nvram set {{interface}}_crypto="aes"',
+            f'nvram set {{interface}}_wpa_psk="9876543210"',
+            f'nvram set {{interface}}_sae_pwe="1"',
+            f'nvram set {{interface}}_key="1"',
+            f'nvram set {{interface}}_key4="12345"',
+            f'nvram set {{interface}}_key1="12345"',
+            f'nvram set {{interface}}_closed="0"',
+            f'wl -i {{interface}} nbr_discovery_cap 64',
+            f'wl -i {{interface}} down',
+            f'wl -i {{interface}} up',
+            'nvram commit',
+            'nvram restart'
+        ]
+    else:
+        print("Invalid security type. Please use 'open', 'wpa2', or 'wpa3'.")
+        return
+    serial_port = '{serial_port}'
+    baud_rate = 115200
+    try:
+        with serial.Serial(serial_port, baud_rate, timeout=2) as ser:
+            time.sleep(1)
+            for command in commands:
+                ser.write((command + '\\n').encode('utf-8'))
+                time.sleep(0)
+                while ser.in_waiting > 0:
+                    output = ser.read_until(b'\\n').decode('utf-8')
+                    print(output)
+            print("Waiting for confirmation: '--WLSSK RESTART DONE--'...")
+            while True:
+                output = ser.read_until(b'\\n').decode('utf-8')
+                print(output)
+                if "--WLSSK RESTART DONE--" in output:
+                    print("Detected '--WLSSK RESTART DONE--'. Acknowledged Done.")
+                    break
+    except serial.SerialException as e:
+        print(f"Error: {{e}}")
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python3 TMsec.py <interface> <security_type>")
+        sys.exit(1)
+    interface = sys.argv[1]
+    security_type = sys.argv[2]
+    configure_ap(interface, security_type)
+'''
+
+ASSOC_SH = r'''#!/bin/bash
+
+DEFAULT_PASSWORD="9876543210"
+
+execute_command() {
+    local cmd="$1"
+    echo "Command: $cmd"
+    output=$(eval "$cmd" 2>&1)
+    echo "Output: $output"
+    echo ""
+    echo "$output"
+}
+
+connect_open() {
+    local ssid="$1"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 remove_net all"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 add_net"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 ssid '\"${ssid}\"'"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 key_mgmt NONE"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 enable_n 0"
+    sleep 7
+    execute_command "wl -i wlan0 status"
+}
+
+connect_wpa2() {
+    local ssid="$1"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 remove_net all"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 add_net"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 ssid '\"${ssid}\"'"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 ieee80211w 0"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 key_mgmt WPA-PSK"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 proto WPA2"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 pairwise CCMP"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 psk '\"${DEFAULT_PASSWORD}\"'"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 enable_n 0"
+    sleep 7
+    execute_command "wl -i wlan0 status"
+}
+
+connect_wpa3() {
+    local ssid="$1"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 remove_net all"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 add_net"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 ssid '\"${ssid}\"'"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set pmf 1"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 key_mgmt SAE"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 ieee80211w 2"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 psk '\"${DEFAULT_PASSWORD}\"'"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set_net 0 pairwise CCMP"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 set sae_pwe 2"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 save_config"
+    execute_command "./wpa_cli -i wpa_wlan0_cmd IFNAME=wlan0 enable_n 0"
+    sleep 9
+    execute_command "wl -i wlan0 status"
+}
+
+main() {
+    if [ "$#" -lt 2 ]; then
+        echo "Usage: bash assoc.sh <SSID> <security_type>"
+        echo "Security types: open, wpa2, wpa3"
+        exit 1
+    fi
+
+    local ssid="$1"
+    local security_type="${2,,}"
+
+    case "$security_type" in
+        open)  connect_open  "$ssid" ;;
+        wpa2)  connect_wpa2  "$ssid" ;;
+        wpa3)  connect_wpa3  "$ssid" ;;
+        *)
+            echo "Invalid security type. Please use 'open', 'wpa2', or 'wpa3'."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+'''
+
+# ============================================================================
+# 5312 SERIAL HELPERS
+# ============================================================================
+def serial_send_command(port: str, command: str, baud: int = 230400, wait: float = 2.0) -> str:
+    """Send a single command over serial and return output."""
+    print(f"[SERIAL] {port} <- {command}")
+    with serial.Serial(port, baud, timeout=wait) as ser:
+        time.sleep(0.5)
+        ser.write((command + '\n').encode('utf-8'))
+        time.sleep(wait)
+        output = b""
+        while ser.in_waiting > 0:
+            output += ser.read(ser.in_waiting)
+            time.sleep(0.1)
+    decoded = output.decode('utf-8', errors='replace')
+    print(f"[SERIAL] output: {decoded}")
+    return decoded
+
+def serial_assoc_5312(dut_serial_port: str, ssid: str, sec: str):
+    """Associate 5312 DUT to AP via serial. Verify with wifi connectstatus. Retry up to 2 times."""
+    PASSWORD = "9876543210"
+    sec_map = {"open": "0", "wpa2": "1", "wpa3": "2"}
+    sec_num = sec_map.get(sec)
+    if sec_num is None:
+        raise RuntimeError(f"Unknown security type for 5312: {sec}")
+    if sec == "open":
+        assoc_cmd = f"wifi connect {ssid} {sec_num}"
+    else:
+        assoc_cmd = f"wifi connect {ssid} {sec_num} {PASSWORD}"
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        print(f"[5312] Association attempt {attempt}/{max_attempts}")
+        serial_send_command(dut_serial_port, assoc_cmd, wait=10.0)
+        time.sleep(3)
+        status_out = serial_send_command(dut_serial_port, "wifi connectstatus", wait=3.0)
+        if "STATUS: CONNECTED" in status_out:
+            print(f"[5312] Connected on attempt {attempt}")
+            return
+        print(f"[5312] Not connected. Output: {status_out.strip()}")
+
+    raise RuntimeError(f"[5312] DUT failed to associate after {max_attempts} attempts  marking FAIL")
+
+def serial_ifconfig_5312(dut_serial_port: str, ip: str = "192.168.1.10"):
+    """Set IP on 5312 DUT via serial."""
+    serial_send_command(dut_serial_port, f"wifi ifconfig sta {ip}", wait=3.0)
+
+def rwl_wl_command(tm_ip: str, wl_cmd: str) -> str:
+    """Issue a wl command to 5312 DUT via TM RWL path."""
+    ssh_cmd = f"cd /root/5312_BetaRC1 && ./RWL.sh && ./wl -i sta --serial /dev/ttyUSB3 --baud 230400 \"{wl_cmd}\""
+    out, err, rc, to = execute_command(ssh_cmd, remote_host=tm_ip, timeout=30)
+    return out.strip() or err.strip()
+
+def build_hex_command(enet_mac: str, dut_mac: str, dut_ip: str) -> str:
+    """Build NAT hex packet string."""
+    enet_mac_clean = enet_mac.replace(":", "")
+    dut_mac_clean  = dut_mac.replace(":", "")
+    ip_parts = dut_ip.split('.')
+    ip_hex = ''.join([f'{int(o):02X}' for o in ip_parts])
+    receiver_ip = "FFFFFFFF"
+    return f"0x{enet_mac_clean}{dut_mac_clean}08004500001E000040004011C52A{ip_hex}{receiver_ip}13C413C4000A00000A0D"
+
+def nat_5312(dut_serial_port: str, mode: str, interval: int, hex_cmd: str):
+    """Send wifi mkeep_alive command via serial on 5312 DUT."""
+    if mode == "mkai":
+        cmd = f"wifi mkeep_alive 0 immediate {interval} {hex_cmd}"
+    else:
+        cmd = f"wifi mkeep_alive 0 {interval} {hex_cmd}"
+    serial_send_command(dut_serial_port, cmd, wait=3.0)
+
+# ============================================================================
+# FILE VERIFICATION & CREATION MODULE
+# ============================================================================
+class FileVerifier:
+    def __init__(self, device_config: Dict[str, Dict], serial_port: str = None):
+        self.device_config = device_config
+        self.missing_files = {}
+        self.verified_files = {}
+        self.serial_port = serial_port or '/dev/ttyUSB0'
+
+    def check_file_exists(self, file_path: str, remote_host: str = None) -> bool:
+        if remote_host:
+            cmd = f"test -e {shlex.quote(file_path)} && echo ok || echo missing"
+            out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=10)
+            return out.strip() == "ok"
+        else:
+            return os.path.isfile(file_path)
+
+    def create_directory_remote(self, dir_path: str, remote_host: str) -> bool:
+        cmd = f"mkdir -p {shlex.quote(dir_path)}"
+        out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=10)
+        if rc == 0:
+            print(f"  ? Created remote directory: {dir_path}")
+            return True
+        else:
+            print(f"  ? Failed to create remote directory: {err}")
+            return False
+
+    def create_file_remote(self, file_path: str, content: str, remote_host: str,
+                           executable: bool = False) -> bool:
+        try:
+            b64_content = base64.b64encode(content.encode()).decode()
+            chmod_part = f" && chmod +x {shlex.quote(file_path)}" if executable else ""
+            cmd = f"echo '{b64_content}' | base64 --decode > {shlex.quote(file_path)}{chmod_part}"
+            out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=30)
+            if rc == 0:
+                print(f"  ? Created file: {file_path}")
+                return True
+            else:
+                print(f"  ? Failed to create file: {err}")
+                return False
+        except Exception as e:
+            print(f"  ? Error creating file: {e}")
+            return False
+
+    def create_nat_sh_remote(self, file_path: str, enet_mac: str, dut_mac: str, dut_ip: str, remote_host: str) -> bool:
+        try:
+            command_hex = build_hex_command(enet_mac, dut_mac, dut_ip)
+            nat_sh_content = f'''#!/bin/bash
+COMMAND="{command_hex}"
+if [ "$1" == "ka" ]; then
+   ./wl keep_alive $2 $COMMAND
+elif [ "$1" == "mka" ]; then
+   ./wl mkeep_alive 1 $2 $COMMAND
+elif [ "$1" == "mkai" ]; then
+   ./wl mkeep_alive 1 immediate $2 $COMMAND
+fi
+'''
+            b64_content = base64.b64encode(nat_sh_content.encode()).decode()
+            cmd = f"echo '{b64_content}' | base64 --decode > {shlex.quote(file_path)} && chmod +x {shlex.quote(file_path)}"
+            out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=30)
+            if rc == 0:
+                print(f"  ? Created and made executable: {file_path}")
+                return True
+            else:
+                print(f"  ? Failed to create NAT.sh: {err}")
+                return False
+        except Exception as e:
+            print(f"  ? Error creating NAT.sh: {e}")
+            return False
+
+    def auto_create_missing_files(self, device_name: str, remote_host: str = None,
+                                   enet_mac: str = None, dut_mac: str = None, dut_ip: str = None) -> bool:
+        if device_name not in self.device_config:
+            return False
+        device_info = self.device_config[device_name]
+        base_path = device_info.get('path', '')
+        missing = self.missing_files.get(device_name, [])
+        if not missing:
+            return True
+        print(f"\n?? Auto-creating missing files for '{device_name}'...\n")
+        for file_name in missing:
+            full_path = os.path.join(base_path, file_name)
+            if file_name == 'TMconfig.py':
+                content = TMCONFIG_PY.format(serial_port=self.serial_port)
+                if not self.create_file_remote(full_path, content, remote_host):
+                    return False
+            elif file_name == 'TMsec.py':
+                content = TMSEC_PY.format(serial_port=self.serial_port)
+                if not self.create_file_remote(full_path, content, remote_host):
+                    return False
+            elif file_name == 'assoc.sh':
+                if not self.create_file_remote(full_path, ASSOC_SH, remote_host, executable=True):
+                    return False
+            elif file_name == 'NAT.sh':
+                if not enet_mac or not dut_mac or not dut_ip:
+                    print(f"  ? NAT.sh requires enet_mac, dut_mac, and dut_ip parameters")
+                    return False
+                if not self.create_nat_sh_remote(full_path, enet_mac, dut_mac, dut_ip, remote_host):
+                    return False
+            elif file_name.endswith('/'):
+                if not self.create_directory_remote(full_path.rstrip('/'), remote_host):
+                    return False
+        if remote_host:
+            cmd = f"find {shlex.quote(base_path)} -name '*.sh' -type f -exec chmod +x {{}} \\;"
+            out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=10)
+            if rc == 0:
+                print(f"  ? Made all .sh files executable in {base_path}")
+            else:
+                print(f"  ??  Warning: Could not set executable permissions: {err}")
+        return True
+
+    def verify_device_files(self, device_name: str, remote_host: str = None) -> Tuple[bool, List[str]]:
+        if device_name not in self.device_config:
+            print(f"  ??  Device '{device_name}' not found in configuration.")
+            return False, []
+        device_info = self.device_config[device_name]
+        base_path = device_info.get('path', '')
+        required_files = device_info.get('required_files', [])
+        if remote_host:
+            self.create_directory_remote(base_path, remote_host)
+        if not required_files:
+            print(f"  ? No required files configured for '{device_name}'")
+            return True, []
+        missing = []
+        present = []
+        for file_name in required_files:
+            if not file_name:
+                continue
+            full_path = os.path.join(base_path, file_name)
+            if self.check_file_exists(full_path, remote_host=remote_host):
+                present.append(file_name)
+                print(f"    ? Found: {full_path}")
+            else:
+                missing.append(file_name)
+                print(f"    ? Missing: {full_path}")
+        self.verified_files[device_name] = present
+        self.missing_files[device_name] = missing
+        return len(missing) == 0, missing
+
+    def verify_all_devices(self, device_ips: Dict[str, Optional[str]] = None) -> bool:
+        if device_ips is None:
+            device_ips = {}
+        print("\n" + "="*70)
+        print("?? VERIFYING REQUIRED FILES ACROSS ALL DEVICES")
+        print("="*70 + "\n")
+        all_verified = True
+        for device_name in self.device_config.keys():
+            remote_ip = device_ips.get(device_name)
+            if remote_ip is None:
+                print(f"?  Skipping '{device_name}' (not configured)\n")
+                continue
+            print(f"?? Checking Remote Device: '{device_name}' ({remote_ip})")
+            print("-" * 70)
+            is_verified, missing = self.verify_device_files(device_name, remote_host=remote_ip)
+            if not is_verified:
+                all_verified = False
+            print()
+        return all_verified
+
+    def handle_missing_files_with_auto_create(self, device_ips: Dict[str, Optional[str]] = None) -> bool:
+        if device_ips is None:
+            device_ips = {}
+        devices_with_missing = [d for d, files in self.missing_files.items() if files]
+        if not devices_with_missing:
+            print("\n? All required files are present! Proceeding with execution...")
+            return True
+        print(f"\n??  Files missing on {len(devices_with_missing)} device(s)")
+        print("?? AUTO-CREATING MISSING FILES...\n")
+        enet_mac = None
+        dut_mac = None
+        dut_ip_for_nat = None
+        for device_name in devices_with_missing:
+            if 'NAT.sh' in self.missing_files.get(device_name, []):
+                print("\n?? NAT.sh requires additional inputs:\n")
+                enet_mac = input("Enter ENET MAC (e.g., f8:e4:3b:af:bf:d7): ").strip()
+                dut_mac = input("Enter DUT MAC (e.g., f8:e4:3b:af:bf:d7): ").strip()
+                dut_ip_for_nat = input("Enter DUT IP (e.g., 192.168.1.10): ").strip()
+                break
+        for device_name in devices_with_missing:
+            remote_ip = device_ips.get(device_name)
+            if remote_ip is None:
+                continue
+            print(f"\n?? Processing device: '{device_name}'")
+            print("-" * 70)
+            if not self.auto_create_missing_files(device_name, remote_host=remote_ip,
+                                                   enet_mac=enet_mac, dut_mac=dut_mac, dut_ip=dut_ip_for_nat):
+                print(f"\n? FATAL: Failed to create files on '{device_name}'")
+                return False
+        print("\n? All missing files have been created successfully!")
+        return True
+
+# ============================================================================
+# MAIN EXECUTION FUNCTIONS
+# ============================================================================
+def execute_command(command, remote_host=None, new_terminal=False, terminal_name=None, timeout=None):
+    skip_printing = command.endswith(", dp")
+    if skip_printing:
+        command = command[:-4]
+    if remote_host:
+        full_command = f"ssh root@{remote_host} '{command}'"
+    else:
+        full_command = command
+    print(f"Executing: {full_command}")
+    if new_terminal:
+        if terminal_name:
+            full_command = f"gnome-terminal --title=\"{terminal_name}\" -- bash -c \"{full_command}; exec bash\""
+        else:
+            full_command = f"gnome-terminal -- bash -c \"{full_command}; exec bash\""
+        try:
+            proc = subprocess.run(full_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            return proc.stdout.decode(), proc.stderr.decode(), proc.returncode, False
+        except subprocess.TimeoutExpired:
+            return "", f"Timed out after {timeout} seconds", -1, True
+    else:
+        proc = subprocess.Popen(full_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            output, error = proc.communicate(timeout=timeout)
+            if not skip_printing:
+                if output:
+                    print(output.decode())
+                if error:
+                    print(error.decode())
+            return output.decode(), error.decode(), proc.returncode, False
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                output, error = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                output, error = b"", b""
+            out_decoded = output.decode() if output else ""
+            err_decoded = error.decode() if error else ""
+            print(f"Command timed out after {timeout} seconds; process killed.")
+            if out_decoded and not skip_printing:
+                print(out_decoded)
+            if err_decoded and not skip_printing:
+                print(err_decoded)
+            return out_decoded, err_decoded, -1, True
+
+def append_text_to_file_on_tm(tm_ip, remote_main_file, label, text):
+    b64 = base64.b64encode(text.encode()).decode()
+    quoted_label = shlex.quote(f"--- {label} ---")
+    cmd = (
+        f"echo {quoted_label} >> {shlex.quote(remote_main_file)} && "
+        f"echo {shlex.quote(b64)} | base64 --decode >> {shlex.quote(remote_main_file)} && "
+        f"echo '' >> {shlex.quote(remote_main_file)}"
+    )
+    out, err, rc, to = execute_command(cmd, remote_host=tm_ip, timeout=30)
+    if rc != 0:
+        raise RuntimeError(f"Failed to append to {remote_main_file} on {tm_ip}: rc={rc}, err={err}")
+
+def q(s):
+    return shlex.quote(str(s))
+
+def remote_file_exists(remote_host, path):
+    cmd = f"test -e {q(path)} && echo ok || echo missing"
+    out, err, rc, to = execute_command(cmd, remote_host=remote_host, timeout=10)
+    return out.strip() == "ok"
+
+def NATKA(title, mode, intf, SSID, ch, sec, tm_ip, dut_ip, dut_build_path='/build',
+          is_5312=False, dut_serial_port=None, hex_cmd=None):
+    main_output_file = "/root/NATMATKA/Results/Main_Output_File.txt"
+    pcap_dir = "/root/NATMATKA/"
+    capture_duration = 25
+
+    if not tm_ip:
+        raise RuntimeError("NATKA called with empty tm_ip  aborting.")
+    if is_5312 and not dut_serial_port:
+        raise RuntimeError("5312 mode requires dut_serial_port.")
+    if is_5312 and not hex_cmd:
+        raise RuntimeError("5312 mode requires hex_cmd for NAT commands.")
+    if not is_5312 and not dut_ip:
+        raise RuntimeError("NATKA called with empty dut_ip  aborting.")
+
+    def run_or_raise(cmd, host, timeout=60, desc=None):
+        if not host:
+            raise RuntimeError(f"run_or_raise called with empty host for cmd: {cmd!r}")
+        out, err, rc, timed_out = execute_command(cmd, remote_host=host, timeout=timeout)
+        ok = (rc == 0 and not timed_out)
+        if not ok:
+            err = (err or "") + (f"\n[CMD] {cmd}\n[RC] {rc}\n[TIMEOUT] {timed_out}\n")
+        return ok, out, err, rc, timed_out
+
+    # Log start
+    run_or_raise(f"echo 'Starting test case: {title}' >> {q(main_output_file)}", tm_ip, timeout=10)
+
+    # Configure TM (same for both chip types)
+    run_or_raise(f"cd /root/NATMATKA && python3 TMconfig.py {q(intf)} {q(ch)}", tm_ip, timeout=30)
+    run_or_raise(f"cd /root/NATMATKA && python3 TMsec.py {q(intf)} {q(sec)}, dp", tm_ip, timeout=None)
+
+    if is_5312:
+        # ---- 5312 DUT flow ----
+        serial_assoc_5312(dut_serial_port, SSID, sec)
+        time.sleep(20)
+        dut_status = rwl_wl_command(tm_ip, "status")
+        if dut_status:
+            append_text_to_file_on_tm(tm_ip, main_output_file, f"{title} - DUT status", dut_status)
+        serial_ifconfig_5312(dut_serial_port)
+        nat_5312(dut_serial_port, mode, 0, hex_cmd)
+        time.sleep(1)
+        nat_5312(dut_serial_port, mode, 3000, hex_cmd)
+    else:
+        # ---- Non-5312 DUT flow ----
+        run_or_raise(f"cd {dut_build_path} && bash assoc.sh {q(SSID)} {q(sec)}", dut_ip, timeout=30)
+        time.sleep(20)
+        wl_out, wl_err, rc, to = execute_command("sleep 5 && wl -i wlan0 status", remote_host=dut_ip, timeout=30)
+        dut_status = wl_out.strip() or wl_err.strip()
+        if dut_status:
+            append_text_to_file_on_tm(tm_ip, main_output_file, f"{title} - DUT status", dut_status)
+        run_or_raise("ifconfig wlan0 192.168.1.10", dut_ip, timeout=10)
+        nat_base = 30
+        nat_timeout = nat_base + 60
+        run_or_raise(f"cd {dut_build_path} && ./NAT.sh {mode} 0 && sleep 1 && ./NAT.sh {mode} 3000", dut_ip, timeout=nat_timeout)
+
+    # ---- tcpdump on TM (same for both chip types) ----
+    log_path = f"{pcap_dir}/{title}_tcpdump.log"
+    tcpdump_cmd = (
+        f"cd {q(pcap_dir)} && timeout 30s tcpdump -i eth1 -s 0 -U -n "
+        f"> {q(log_path)} 2>/tmp/tcpdump_err_{int(time.time())}.log &"
+    )
+    execute_command(tcpdump_cmd, remote_host=tm_ip, timeout=None)
+    print(f"? Waiting for capture to complete ({capture_duration} seconds)...\n")
+    time.sleep(capture_duration + 3)
+
+    if not remote_file_exists(tm_ip, log_path):
+        raise RuntimeError(f"tcpdump log not found on TM: {log_path}")
+
+    out, err, rc, to = execute_command(f"stat -c %s {q(log_path)}", remote_host=tm_ip, timeout=10)
+    size = int(out.strip() or 0)
+    print(f"?? TCPDUMP CAPTURE RESULTS:\n  ? File size: {size} bytes\n")
+    if size == 0:
+        raise RuntimeError(f"tcpdump log {log_path} exists but is empty on {tm_ip}")
+
+    run_or_raise(f"echo {q(f'--- {title} (tcpdump log) ---')} >> {q(main_output_file)}", tm_ip, timeout=10)
+    run_or_raise(f"cat {q(log_path)} >> {q(main_output_file)}", tm_ip, timeout=10)
+    run_or_raise(f"echo '' >> {q(main_output_file)}", tm_ip, timeout=5)
+    print(f"? tcpdump log saved and appended to main output file\n")
+
+    # ---- Cleanup ----
+    time.sleep(35)
+    if is_5312:
+        nat_5312(dut_serial_port, mode, 0, hex_cmd)
+    else:
+        run_or_raise(f"cd {dut_build_path} && ./NAT.sh {mode} 0", dut_ip, timeout=10)
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+if __name__ == "__main__":
+    print("\n" + "="*70)
+    print("?? FULLY AUTOMATED NATKA EXECUTION SCRIPT")
+    print("="*70)
+
+    # ---- Chip type ----
+    chip_input = input("\n?? Is chip 5312? (y/n, default: n): ").strip().lower()
+    is_5312 = chip_input == 'y'
+    print(f"? Chip 5312: {is_5312}")
+
+    # ---- TM serial port (for AP config via TMconfig/TMsec) ----
+    serial_port = input("\n?? Enter TM Serial Port (default: /dev/ttyUSB0): ").strip()
+    if not serial_port:
+        serial_port = '/dev/ttyUSB0'
+    print(f"? TM Serial Port: {serial_port}")
+
+    # ---- DUT serial port (5312 only) ----
+    dut_serial_port = None
+    if is_5312:
+        dut_serial_port = input("\n?? Enter DUT Serial Port (e.g. /dev/ttyUSB0, /dev/ttyUSB1): ").strip()
+        if not dut_serial_port:
+            dut_serial_port = '/dev/ttyUSB0'
+        print(f"? DUT Serial Port: {dut_serial_port}")
+
+    # ---- DUT build path (non-5312 only) ----
+    dut_build_path = '/build'
+    if not is_5312:
+        dut_build_path = input("\n?? Enter DUT build path (default: /build): ").strip()
+        if not dut_build_path:
+            dut_build_path = '/build'
+        print(f"? DUT build path: {dut_build_path}")
+
+    # ---- Device IPs ----
+    print("\n" + "="*70)
+    print("?? DEVICE IP CONFIGURATION")
+    print("="*70 + "\n")
+    tm_ip = input("Enter the IP address of TM: ").strip()
+    dut_ip = None
+    if not is_5312:
+        dut_ip = input("Enter the IP address of DUT: ").strip()
+
+    # ---- NAT hex command inputs ----
+    hex_cmd = None
+    print("\n?? NAT hex command inputs:\n")
+    enet_mac = input("Enter ENET MAC (e.g., f8:e4:3b:af:bf:d7): ").strip()
+    dut_mac  = input("Enter DUT MAC (e.g., f8:e4:3b:af:bf:d7): ").strip()
+    dut_ip_for_nat = input("Enter DUT IP for NAT (e.g., 192.168.1.10): ").strip()
+    hex_cmd = build_hex_command(enet_mac, dut_mac, dut_ip_for_nat)
+    print(f"? Built hex command: {hex_cmd}")
+
+    # ---- File verification ----
+    if is_5312:
+        # Only TM files needed
+        device_configuration = {
+            'TM': {
+                'path': '/root/NATMATKA',
+                'required_files': ['TMconfig.py', 'TMsec.py', 'Results/']
+            },
+        }
+        device_ips: Dict[str, Optional[str]] = {'TM': tm_ip}
+    else:
+        device_configuration = {
+            'TM': {
+                'path': '/root/NATMATKA',
+                'required_files': ['TMconfig.py', 'TMsec.py', 'Results/']
+            },
+            'DUT': {
+                'path': dut_build_path,
+                'required_files': ['assoc.sh', 'NAT.sh']
+            },
+        }
+        device_ips: Dict[str, Optional[str]] = {'TM': tm_ip, 'DUT': dut_ip}
+
+    verifier = FileVerifier(device_configuration, serial_port=serial_port)
+    print("\n?? Starting file verification process...\n")
+    time.sleep(1)
+
+    if not verifier.verify_all_devices(device_ips=device_ips):
+        print("\n??  Some files are missing on remote devices.\n")
+        if not verifier.handle_missing_files_with_auto_create(device_ips=device_ips):
+            print("\n? EXECUTION ABORTED: Cannot create required files.")
+            sys.exit(1)
+        print("\n?? Re-verifying files after creation...\n")
+        time.sleep(2)
+        if not verifier.verify_all_devices(device_ips=device_ips):
+            print("\n? FATAL: Some files still missing after creation attempt.")
+            sys.exit(1)
+    else:
+        print("\n? All required files verified successfully!")
+
+    # ---- Test cases ----
+    cases = [
+        # ("1_NAT_UDP_keep_alive_2G20_Open", "ka",   "wl2", "BrcmAP2", "6",      "open"),
+        # ("2_NAT_UDP_keep_alive_2G20_WPA2", "ka",   "wl2", "BrcmAP2", "6",      "wpa2"),
+        # ("3_NAT_UDP_keep_alive_2G20_WPA3", "ka",   "wl2", "BrcmAP2", "6",      "wpa3"),
+        # ("4_NAT_UDP_keep_alive_5G80_open", "ka",   "wl1", "BrcmAP1", "36/80",  "open"),
+        # ("5_NAT_UDP_keep_alive_5G80_WPA2", "ka",   "wl1", "BrcmAP1", "36/80",  "wpa2"),
+        # ("6_NAT_UDP_keep_alive_5G80_WPA3", "ka",   "wl1", "BrcmAP1", "36/80",  "wpa3"),
+        # ("7_NAT_UDP_keep_alive_6G80_WPA3", "ka",   "wl0", "BrcmAP0", "6g5/80", "wpa3"),
+        ("8_MAT_UDP_keep_alive_2G20_Open",               "mka",  "wl2", "BrcmAP2", "6",      "open"),
+        ("9_MAT_UDP_keep_alive_2G20_WPA2",               "mka",  "wl2", "BrcmAP2", "6",      "wpa2"),
+        ("10_MAT_UDP_keep_alive_2G20_WPA3",              "mka",  "wl2", "BrcmAP2", "6",      "wpa3"),
+        ("11_MAT_UDP_keep_alive_5G80_open",              "mka",  "wl1", "BrcmAP1", "36/80",  "open"),
+        ("12_MAT_UDP_keep_alive_5G80_WPA2",              "mka",  "wl1", "BrcmAP1", "36/80",  "wpa2"),
+        ("13_MAT_UDP_keep_alive_5G80_WPA3",              "mka",  "wl1", "BrcmAP1", "36/80",  "wpa3"),
+        ("14_MAT_UDP_keep_alive_immediate_6G80_WPA3",    "mkai", "wl0", "BrcmAP0", "6g5/80", "wpa3"),
+        ("15_MAT_UDP_keep_alive_immediate_2G20_Open",    "mkai", "wl2", "BrcmAP2", "6",      "open"),
+        ("16_MAT_UDP_keep_alive_immediate_2G20_WPA2",    "mkai", "wl2", "BrcmAP2", "6",      "wpa2"),
+        ("17_MAT_UDP_keep_alive_immediate_2G20_WPA3",    "mkai", "wl2", "BrcmAP2", "6",      "wpa3"),
+        ("18_MAT_UDP_keep_alive_immediate_5G80_open",    "mkai", "wl1", "BrcmAP1", "36/80",  "open"),
+        ("19_MAT_UDP_keep_alive_immediate_5G80_WPA2",    "mkai", "wl1", "BrcmAP1", "36/80",  "wpa2"),
+        ("20_MAT_UDP_keep_alive_immediate_5G80_WPA3",    "mkai", "wl1", "BrcmAP1", "36/80",  "wpa3"),
+        ("21_MAT_UDP_keep_alive_immediate_6G80_WPA3",    "mkai", "wl0", "BrcmAP0", "6g5/80", "wpa3"),
+    ]
+
+    print("\n" + "="*70)
+    print("??  STARTING TEST CASE EXECUTION")
+    print("="*70 + "\n")
+
+    passed_cases = []
+    failed_cases = []
+
+    for title, mode, intf, SSID, ch, sec in cases:
+        try:
+            print(f"\n{'='*70}")
+            print(f"?  Executing: {title}")
+            print(f"{'='*70}")
+            NATKA(title, mode, intf, SSID, ch, sec, tm_ip, dut_ip, dut_build_path,
+                  is_5312=is_5312, dut_serial_port=dut_serial_port, hex_cmd=hex_cmd)
+            print(f"? Case {title} completed successfully!")
+            passed_cases.append(title)
+        except Exception as e:
+            print(f"? [ERROR] Case {title} failed: {e}")
+            failed_cases.append(title)
+            continue
+
+    print(f"\n{'='*70}")
+    print("?? TEST EXECUTION SUMMARY")
+    print(f"{'='*70}\n")
+    print(f"? Passed: {len(passed_cases)}/{len(cases)}")
+    print(f"? Failed: {len(failed_cases)}/{len(cases)}\n")
+
+    if passed_cases:
+        print("Passed Cases:")
+        for case in passed_cases:
+            print(f"  ? {case}")
+
+    if failed_cases:
+        print("\nFailed Cases:")
+        for case in failed_cases:
+            print(f"  ? {case}")
+
+    print(f"\n{'='*70}\n")
